@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+LED="/sys/class/leds/platform::micmute/brightness"
+DEVICE="/dev/input/by-path/platform-thinkpad_acpi-event"
+
+get_default_source() {
+  pactl info 2>/dev/null | awk -F': ' '/Default Source/ {print $2}'
+}
+
+sync_led() {
+  local muted source
+
+  if command -v wpctl >/dev/null 2>&1; then
+    if wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null | grep -q "MUTED"; then
+      echo 1 > "$LED"
+    else
+      echo 0 > "$LED"
+    fi
+    return 0
+  fi
+
+  source="$(get_default_source)"
+  if [[ -z "${source:-}" ]]; then
+    return 0
+  fi
+
+  muted="$(pactl get-source-mute "$source" 2>/dev/null | awk '{print $2}')"
+  if [[ "$muted" == "yes" ]]; then
+    echo 1 > "$LED"
+  elif [[ "$muted" == "no" ]]; then
+    echo 0 > "$LED"
+  fi
+}
+
+wait_for_source() {
+  until [[ -n "$(get_default_source)" ]] || command -v wpctl >/dev/null 2>&1; do
+    sleep 1
+  done
+}
+
+wait_for_source
+sync_led
+
+# Fallback: update whenever PipeWire/Pulse changes
+(
+  while true; do
+    pactl subscribe 2>/dev/null | while read -r line; do
+      case "$line" in
+        *"Event 'change' on source #"*|*"Event 'change' on server #"*)
+          sync_led
+          ;;
+      esac
+    done
+    sleep 1
+  done
+) &
+
+# Key event listener (libinput is more reliable in services)
+while true; do
+  libinput debug-events --device "$DEVICE" 2>/dev/null | while read -r line; do
+    case "$line" in
+      *"KEY_MICMUTE"*state\ pressed*)
+        sleep 0.05
+        sync_led
+        ;;
+    esac
+  done
+  sleep 1
+done
