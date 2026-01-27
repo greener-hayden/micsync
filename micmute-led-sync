@@ -1,71 +1,233 @@
 #!/usr/bin/env bash
+#
+# micmute-led-sync - Sync ThinkPad mic-mute LED with microphone mute state
+#
+# This script follows ALSA UCM best practices (Case 1) for internal microphones
+# while providing userspace fallback for USB/external microphones.
+#
+# Best Practice Note:
+# Per ALSA UCM documentation, LEDs should respond only to internal (built-in)
+# resources for security and predictable behavior. This script implements a
+# hybrid approach:
+#   - UCM handles internal microphone LED (if UCM profile is active)
+#   - This script handles USB/external microphones (fallback mode)
+#
+# Configuration: /etc/micmute-led.conf (or ~/.config/micmute-led/config)
+
 set -u
 set -o pipefail
 
-LED="/sys/class/leds/platform::micmute/brightness"
-DEVICE="/dev/input/by-path/platform-thinkpad_acpi-event"
+# Configuration defaults
+LED_PATH="/sys/class/leds/platform::micmute/brightness"
+INPUT_DEVICE="/dev/input/by-path/platform-thinkpad_acpi-event"
+LED_MODE="hybrid"  # ucm, hybrid, userspace
+UCM_PROFILE=""
+INTERNAL_CARDS=""
 
-get_default_source() {
-  pactl info 2>/dev/null | awk -F': ' '/Default Source/ {print $2}'
-}
-
-sync_led() {
-  local muted source
-
-  if command -v wpctl >/dev/null 2>&1; then
-    if wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null | grep -q "MUTED"; then
-      echo 1 > "$LED"
-    else
-      echo 0 > "$LED"
+# Load configuration
+load_config() {
+    local config_file=""
+    if [[ -f "$HOME/.config/micmute-led/config" ]]; then
+        config_file="$HOME/.config/micmute-led/config"
+    elif [[ -f "/etc/micmute-led.conf" ]]; then
+        config_file="/etc/micmute-led.conf"
     fi
-    return 0
-  fi
-
-  source="$(get_default_source)"
-  if [[ -z "${source:-}" ]]; then
-    return 0
-  fi
-
-  muted="$(pactl get-source-mute "$source" 2>/dev/null | awk '{print $2}')"
-  if [[ "$muted" == "yes" ]]; then
-    echo 1 > "$LED"
-  elif [[ "$muted" == "no" ]]; then
-    echo 0 > "$LED"
-  fi
+    
+    if [[ -n "$config_file" ]]; then
+        # Source the config file safely
+        while IFS='=' read -r key value; do
+            # Skip comments and empty lines
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$key" ]] && continue
+            # Remove whitespace
+            key="$(echo "$key" | tr -d '[:space:]')"
+            value="$(echo "$value" | tr -d '[:space:]' | tr -d '"')"
+            case "$key" in
+                LED_MODE) LED_MODE="$value" ;;
+                UCM_PROFILE) UCM_PROFILE="$value" ;;
+                INTERNAL_CARDS) INTERNAL_CARDS="$value" ;;
+                LED_PATH) LED_PATH="$value" ;;
+                INPUT_DEVICE) INPUT_DEVICE="$value" ;;
+            esac
+        done < "$config_file"
+    fi
 }
 
-wait_for_source() {
-  until [[ -n "$(get_default_source)" ]] || command -v wpctl >/dev/null 2>&1; do
-    sleep 1
-  done
+# Get the default audio source
+get_default_source() {
+    if command -v wpctl >/dev/null 2>&1; then
+        wpctl inspect @DEFAULT_AUDIO_SOURCE@ 2>/dev/null | awk -F'"' '/node.name/ {print $2}'
+    else
+        pactl info 2>/dev/null | awk -F': ' '/Default Source/ {print $2}'
+    fi
 }
 
-wait_for_source
-sync_led
+# Get the source device name (without port suffix)
+get_source_device() {
+    local source="$1"
+    if command -v wpctl >/dev/null 2>&1; then
+        wpctl inspect "$source" 2>/dev/null | awk -F'"' '/device.id/ {print $2}' | head -1
+    else
+        pactl list sources 2>/dev/null | awk -v src="$source" '
+            /Name: / {name=$2}
+            name==src && /device.bus_path/ {print $3}
+        '
+    fi
+}
 
-# Fallback: update whenever PipeWire/Pulse changes
-(
-  while true; do
-    pactl subscribe 2>/dev/null | while read -r line; do
-      case "$line" in
-        *"Event 'change' on source #"*|*"Event 'change' on server #"*)
-          sync_led
-          ;;
-      esac
+# Check if UCM is managing the LED for this device
+is_ucm_managed() {
+    local source="$1"
+    
+    # LED_MODE=ucm: Always let UCM handle it
+    if [[ "$LED_MODE" == "ucm" ]]; then
+        return 0
+    fi
+    
+    # LED_MODE=userspace: Never let UCM handle it
+    if [[ "$LED_MODE" == "userspace" ]]; then
+        return 1
+    fi
+    
+    # LED_MODE=hybrid: Check if this is the internal sound card
+    local device_id
+    device_id="$(get_source_device "$source")"
+    
+    # Check if snd_ctl_led module is loaded and has attachments
+    if [[ -d "/sys/class/sound/ctl-led" ]]; then
+        # Check if any internal card has LED attached
+        for card_dir in /sys/class/sound/ctl-led/mic/card*; do
+            if [[ -d "$card_dir" ]]; then
+                # UCM is managing this LED
+                # Check if our source is from an internal card
+                if [[ -n "$INTERNAL_CARDS" ]]; then
+                    for card in $INTERNAL_CARDS; do
+                        if [[ "$device_id" == *"$card"* ]]; then
+                            return 0  # UCM manages this
+                        fi
+                    done
+                else
+                    # Auto-detect: assume first few PCI cards are internal
+                    # Common internal card patterns
+                    if [[ "$device_id" == *"pci"* ]] || \
+                       [[ "$device_id" == *"usb" == "" ]]; then
+                        return 0  # Likely internal, let UCM handle
+                    fi
+                fi
+            fi
+        done
+    fi
+    
+    return 1  # Not UCM managed, use userspace
+}
+
+# Check if source is USB/external
+is_external_source() {
+    local source="$1"
+    local device_id
+    device_id="$(get_source_device "$source")"
+    
+    # USB or Bluetooth devices are considered external
+    if [[ "$device_id" == *"usb"* ]] || \
+       [[ "$device_id" == *"bluez"* ]] || \
+       [[ "$device_id" == *"bluetooth"* ]]; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Get mute state for a source
+get_mute_state() {
+    local source="$1"
+    local muted="no"
+    
+    if command -v wpctl >/dev/null 2>&1; then
+        if wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null | grep -q "MUTED"; then
+            muted="yes"
+        fi
+    else
+        muted="$(pactl get-source-mute "$source" 2>/dev/null | awk '{print $2}')"
+    fi
+    
+    echo "$muted"
+}
+
+# Sync LED to mute state
+sync_led() {
+    local source
+    local muted
+    
+    source="$(get_default_source)"
+    if [[ -z "${source:-}" ]]; then
+        return 0
+    fi
+    
+    # Check if we should handle this source
+    if ! is_external_source "$source"; then
+        # Internal source - check if UCM is managing it
+        if is_ucm_managed "$source"; then
+            # UCM handles this, exit cleanly
+            return 0
+        fi
+    fi
+    
+    # Userspace handling for external sources
+    muted="$(get_mute_state "$source")"
+    
+    if [[ "$muted" == "yes" ]]; then
+        echo 1 > "$LED_PATH" 2>/dev/null || true
+    else
+        echo 0 > "$LED_PATH" 2>/dev/null || true
+    fi
+}
+
+# Wait for audio subsystem to be ready
+wait_for_audio() {
+    until [[ -n "$(get_default_source)" ]] || command -v wpctl >/dev/null 2>&1; do
+        sleep 1
     done
-    sleep 1
-  done
-) &
+}
 
-# Key event listener (libinput is more reliable in services)
-while true; do
-  libinput debug-events --device "$DEVICE" 2>/dev/null | while read -r line; do
-    case "$line" in
-      *"KEY_MICMUTE"*state\ pressed*)
-        sleep 0.05
-        sync_led
-        ;;
-    esac
-  done
-  sleep 1
-done
+# Main
+main() {
+    load_config
+    
+    # Validate LED path
+    if [[ ! -w "$LED_PATH" ]]; then
+        echo "Error: Cannot write to LED path: $LED_PATH" >&2
+        exit 1
+    fi
+    
+    wait_for_audio
+    sync_led
+    
+    # Set up background monitoring
+    (
+        while true; do
+            pactl subscribe 2>/dev/null | while read -r line; do
+                case "$line" in
+                    *"Event 'change' on source #"*|*"Event 'change' on server #"*)
+                        sync_led
+                        ;;
+                esac
+            done
+            sleep 1
+        done
+    ) &
+    
+    # Key event listener
+    while true; do
+        libinput debug-events --device "$INPUT_DEVICE" 2>/dev/null | while read -r line; do
+            case "$line" in
+                *"KEY_MICMUTE"*state\ pressed*)
+                    sleep 0.05
+                    sync_led
+                    ;;
+            esac
+        done
+        sleep 1
+    done
+}
+
+main "$@"
