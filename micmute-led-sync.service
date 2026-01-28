@@ -9,5 +9,52 @@ ExecStart=%h/.local/bin/micmute-led-sync
 Restart=always
 RestartSec=1
 
+# Security hardening options
+
+# Prevent the service from gaining new privileges (e.g., through setuid binaries)
+NoNewPrivileges=true
+
+# Mount /usr, /boot, /etc as read-only to prevent system modification
+ProtectSystem=strict
+
+# Make home directories read-only (script only needs to read its config)
+ProtectHome=read-only
+
+# Explicitly allow write access only to the LED sysfs node
+ReadWritePaths=/sys/class/leds/platform::micmute
+
+# Use private /tmp directory isolated from other processes
+PrivateTmp=true
+
+# Protect kernel tunable files from modification
+ProtectKernelTunables=true
+
+# Prevent loading of kernel modules
+ProtectKernelModules=true
+
+# Protect cgroup filesystem from modification
+ProtectControlGroups=true
+
+# Prevent realtime scheduling to avoid resource starvation
+RestrictRealtime=true
+
+# Prevent SUID/SGID operations
+RestrictSUIDSGID=true
+
+# Prevent personality changes (e.g., different ABI emulations)
+LockPersonality=true
+
+# Prevent writable-executable memory mappings (W^X protection)
+MemoryDenyWriteExecute=true
+
+# Restrict system calls to basic service set
+SystemCallFilter=@system-service
+
+# Return EPERM for blocked syscalls
+SystemCallErrorNumber=EPERM
+
+# Only allow Unix sockets and netlink (needed for PipeWire/PulseAudio communication)
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
 [Install]
 WantedBy=default.target

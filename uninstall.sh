@@ -27,6 +27,13 @@ if command -v sudo >/dev/null 2>&1; then
     # Remove UCM configuration
     sudo rm -rf /usr/share/alsa/ucm2/conf.d/thinkpad-micmute
     
+    # Remove AppArmor profile if it exists
+    if [[ -f /etc/apparmor.d/usr.bin.micmute-led-sync ]]; then
+        echo "Removing AppArmor profile..."
+        sudo apparmor_parser -R /etc/apparmor.d/usr.bin.micmute-led-sync 2>/dev/null || true
+        sudo rm -f /etc/apparmor.d/usr.bin.micmute-led-sync
+    fi
+    
     sudo udevadm control --reload-rules
     sudo udevadm trigger -s leds
 else

@@ -1,0 +1,320 @@
+# AppArmor profile for micmute-led-sync
+# 
+# This profile provides defense-in-depth mandatory access control for the
+# micmute-led-sync service on systems using AppArmor (Ubuntu, Debian, SUSE, etc.)
+# 
+# The profile restricts the script to only the resources it needs:
+# - Reading its own configuration files
+# - Reading input devices for mic-mute key events
+# - Reading LED sysfs for enumeration and sound subsystem for UCM detection
+# - Writing only to the specific micmute LED brightness file
+# - Executing required audio and utility binaries
+# - No network access (local-only service)
+#
+# Installation: Copy this file to /etc/apparmor.d/usr.bin.micmute-led-sync
+# Then run: sudo apparmor_parser -r /etc/apparmor.d/usr.bin.micmute-led-sync
+
+#include <tunables/global>
+
+# Profile for the micmute-led-sync script when executed via bash
+@{HOME}/.local/bin/micmute-led-sync {
+    #include <abstractions/base>
+    #include <abstractions/bash>
+    #include <abstractions/consoles>
+
+    # =========================================================================
+    # FILE ACCESS
+    # =========================================================================
+
+    # Allow reading the script itself
+    @{HOME}/.local/bin/micmute-led-sync r,
+
+    # Allow reading configuration files
+    @{HOME}/.config/micmute-led/config r,
+    @{HOME}/.config/micmute-led/ r,
+    /etc/micmute-led.conf r,
+
+    # Allow read/write access ONLY to the specific micmute LED brightness file
+    # This is the primary function of the service - controlling the LED state
+    /sys/class/leds/platform::micmute/brightness rw,
+    /sys/devices/platform/**/leds/platform::micmute/brightness rw,
+
+    # Allow read access to LED sysfs nodes for enumeration
+    /sys/class/leds/ r,
+    /sys/class/leds/*/ r,
+    /sys/class/leds/*/brightness r,
+    /sys/class/leds/*/max_brightness r,
+    /sys/devices/platform/**/leds/ r,
+
+    # Allow read access to sound subsystem for UCM detection
+    /sys/class/sound/ r,
+    /sys/class/sound/ctl-led/ r,
+    /sys/class/sound/ctl-led/mic/ r,
+    /sys/class/sound/ctl-led/mic/card*/ r,
+    /sys/class/sound/ctl-led/mic/card*/attach{r,w} r,
+
+    # Allow access to /proc for process information (required by many utilities)
+    /proc/sys/kernel/osrelease r,
+    /proc/sys/kernel/seccomp/actions_avail r,
+    /proc/sys/fs/pipe-max-size r,
+    /proc/self/ r,
+    /proc/self/fd/ r,
+    /proc/self/fd/* r,
+    /proc/self/mountinfo r,
+    /proc/self/mounts r,
+    /proc/self/stat r,
+    /proc/self/status r,
+    /proc/self/task/ r,
+    /proc/self/task/*/ r,
+    /proc/self/task/*/stat r,
+    /proc/self/task/*/status r,
+
+    # Allow access to /run for runtime information
+    /run/udev/data/* r,
+    /run/mount/utab r,
+
+    # Allow access to /dev for device information
+    /dev/ r,
+
+    # =========================================================================
+    # DEVICE ACCESS
+    # =========================================================================
+
+    # Allow read access to input devices for mic-mute key events
+    /dev/input/ r,
+    /dev/input/event* r,
+    /dev/input/by-path/ r,
+    /dev/input/by-path/platform-thinkpad_acpi-event r,
+
+    # Allow access to null device
+    /dev/null rw,
+
+    # Allow access to urandom for utilities that need randomness
+    /dev/urandom r,
+
+    # =========================================================================
+    # BINARY EXECUTION
+    # =========================================================================
+
+    # Script interpreter
+    /{usr/,}bin/bash ixr,
+    /{usr/,}bin/dash ixr,
+
+    # PipeWire/PulseAudio utilities for audio control
+    /{usr/,}bin/wpctl ixr,
+    /{usr/,}bin/pactl ixr,
+    /{usr/,}bin/pacmd ixr,
+
+    # Input device utilities
+    /{usr/,}bin/libinput ixr,
+
+    # ALSA UCM utility
+    /{usr/,}bin/alsaucm ixr,
+    /{usr/,}bin/alsactl ixr,
+
+    # Common utilities used by the script
+    /{usr/,}bin/grep ixr,
+    /{usr/,}bin/egrep ixr,
+    /{usr/,}bin/fgrep ixr,
+    /{usr/,}bin/awk ixr,
+    /{usr/,}bin/gawk ixr,
+    /{usr/,}bin/mawk ixr,
+    /{usr/,}bin/sed ixr,
+    /{usr/,}bin/cat ixr,
+    /{usr/,}bin/sleep ixr,
+    /{usr/,}bin/readlink ixr,
+    /{usr/,}bin/stat ixr,
+    /{usr/,}bin/kill ixr,
+    /{usr/,}bin/modprobe ixr,
+    /{usr/,}bin/tr ixr,
+    /{usr/,}bin/echo ixr,
+    /{usr/,}bin/head ixr,
+    /{usr/,}bin/tail ixr,
+    /{usr/,}bin/cut ixr,
+    /{usr/,}bin/sort ixr,
+    /{usr/,}bin/uniq ixr,
+    /{usr/,}bin/ls ixr,
+    /{usr/,}bin/ps ixr,
+    /{usr/,}bin/jobs ixr,
+    /{usr/,}bin/wait ixr,
+    /{usr/,}bin/exit ixr,
+    /{usr/,}bin/true ixr,
+    /{usr/,}bin/false ixr,
+
+    # System utilities
+    /{usr/,}bin/command ixr,
+    /{usr/,}bin/which ixr,
+    /{usr/,}bin/type ixr,
+    /{usr/,}bin/basename ixr,
+    /{usr/,}bin/dirname ixr,
+    /{usr/,}bin/mkdir ixr,
+    /{usr/,}bin/rmdir ixr,
+    /{usr/,}bin/test ixr,
+    /{usr/,}bin/[ ixr,
+
+    # Required libraries for executed binaries
+    /{usr/,}lib{,32,64}/** mr,
+    /{usr/,}lib{,32,64}/**.so* mr,
+    /{usr/,}lib{,exec,32,64}/** mr,
+
+    # ld.so and related files
+    /etc/ld.so.cache r,
+    /etc/ld.so.conf r,
+    /etc/ld.so.conf.d/ r,
+    /etc/ld.so.conf.d/* r,
+    /{usr/,}lib{,32,64}/ld-*.so* mr,
+
+    # Locale and timezone files
+    /usr/share/locale/** r,
+    /usr/share/alsa/** r,
+    /usr/share/libinput/** r,
+    /etc/locale.alias r,
+    /etc/locale.gen r,
+    /etc/default/locale r,
+    /etc/timezone r,
+    /etc/localtime r,
+    /usr/share/zoneinfo/** r,
+
+    # PipeWire/PulseAudio configuration
+    /etc/pipewire/ r,
+    /etc/pipewire/** r,
+    /usr/share/pipewire/** r,
+    /etc/pulse/ r,
+    /etc/pulse/** r,
+    /usr/share/pulseaudio/** r,
+
+    # ALSA configuration
+    /etc/asound.conf r,
+    @{HOME}/.asoundrc r,
+    /usr/share/alsa/** r,
+
+    # UCM configuration
+    /usr/share/alsa/ucm2/** r,
+
+    # User data for audio
+    @{HOME}/.config/pipewire/** r,
+    @{HOME}/.config/pulse/** r,
+    @{HOME}/.local/state/pipewire/** rw,
+    @{HOME}/.local/state/wireplumber/** rw,
+
+    # Runtime directories
+    /run/user/*/ r,
+    /run/user/*/pipewire* rw,
+    /run/user/*/pulse/ rw,
+    /run/user/*/pulse/* rw,
+
+    # =========================================================================
+    # NETWORK (DENY ALL)
+    # =========================================================================
+    
+    # This is a local-only service - deny all network access
+    deny network inet stream,
+    deny network inet dgram,
+    deny network inet6 stream,
+    deny network inet6 dgram,
+    deny network raw,
+    deny network packet,
+    deny network netlink,
+
+    # Allow local Unix sockets only (for PipeWire/PulseAudio communication)
+    unix (create, connect, receive, send, read, write, getattr, getopt, setopt, shutdown) 
+        addr=@*,
+    unix (create, connect, receive, send, read, write, getattr, getopt, setopt, shutdown) 
+        addr=@@*,
+    unix (create, connect, receive, send, read, write, getattr, getopt, setopt, shutdown) 
+        type=stream,
+    unix (create, connect, receive, send, read, write, getattr, getopt, setopt, shutdown) 
+        type=dgram,
+
+    # =========================================================================
+    # SIGNALS AND PTRACE
+    # =========================================================================
+
+    # Allow sending signals to itself and child processes
+    signal (receive, send, set, get) peer=@{profile_name},
+    signal (receive, send, set, get) set=(term, kill, int, hup, pipe, quit, alrm, usr1, usr2, cont, stop, tstp, ttin, ttou) peer=@{profile_name},
+
+    # Allow ptrace for debugging child processes
+    ptrace (trace) peer=@{profile_name},
+    ptrace (read) peer=@{profile_name},
+
+    # =========================================================================
+    # MOUNT AND PIVOT ROOT
+    # =========================================================================
+
+    # Deny mount operations
+    deny mount,
+    deny remount,
+    deny umount,
+
+    # Deny pivot_root
+    deny pivot_root,
+
+    # =========================================================================
+    # CAPABILITIES
+    # =========================================================================
+
+    # No special capabilities needed - the service runs as a regular user
+    # and relies on group membership (video, input) for device access
+    capability setuid,
+    capability setgid,
+    capability sys_admin,
+    capability sys_resource,
+    capability dac_read_search,
+    capability dac_override,
+    capability ipc_lock,
+
+    # =========================================================================
+    # EXECUTABLE MAPPING
+    # =========================================================================
+
+    # Map execution of child processes
+    ix /** -> @{profile_name},
+    ix /**/ -> @{profile_name},
+
+    # =========================================================================
+    # DENY RULES (Additional hardening)
+    # =========================================================================
+
+    # Deny access to sensitive files
+    deny /etc/shadow r,
+    deny /etc/shadow- r,
+    deny /etc/passwd r,
+    deny /etc/passwd- r,
+    deny /etc/group r,
+    deny /etc/group- r,
+    deny /etc/gshadow r,
+    deny /etc/gshadow- r,
+    deny /etc/securetty r,
+    deny /etc/security/ r,
+    deny /root/ r,
+    deny /root/** r,
+
+    # Deny kernel module manipulation except through modprobe
+    deny /lib/modules/** w,
+    deny /usr/lib/modules/** w,
+
+    # Deny access to bootloader
+    deny /boot/ r,
+    deny /boot/** r,
+
+    # Deny writing to system directories
+    deny /bin/** w,
+    deny /sbin/** w,
+    deny /usr/bin/** w,
+    deny /usr/sbin/** w,
+    deny /usr/local/bin/** w,
+    deny /usr/local/sbin/** w,
+    deny /etc/** w,
+    deny /opt/** w,
+
+    # Deny access to other users' home directories
+    deny /home/*/.local/bin/micmute-led-sync r,
+    deny /home/*/.config/micmute-led/ r,
+    deny /home/*/.config/micmute-led/** r,
+
+    # Explicit deny of write to LED files other than the specific micmute one
+    deny /sys/class/leds/*/brightness w,
+    deny /sys/class/leds/platform::micmute/trigger w,
+    deny /sys/class/leds/platform::micmute/* wk,
+}

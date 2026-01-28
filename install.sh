@@ -87,6 +87,18 @@ if command -v sudo >/dev/null 2>&1; then
     sudo udevadm trigger -s leds
     sudo systemd-tmpfiles --create /etc/tmpfiles.d/micmute-led.conf
     
+    # Install AppArmor profile if AppArmor is available
+    if command -v apparmor_parser >/dev/null 2>&1; then
+        if [[ -d /etc/apparmor.d ]]; then
+            echo "Installing AppArmor profile..."
+            sudo install -m 644 "$SCRIPT_DIR/usr.bin.micmute-led-sync" /etc/apparmor.d/usr.bin.micmute-led-sync
+            sudo apparmor_parser -r /etc/apparmor.d/usr.bin.micmute-led-sync 2>/dev/null || {
+                echo "Note: Could not load AppArmor profile. You may need to reload it manually:" >&2
+                echo "      sudo apparmor_parser -r /etc/apparmor.d/usr.bin.micmute-led-sync" >&2
+            }
+        fi
+    fi
+    
     # Add user to required groups
     sudo usermod -aG video,input "$USER" || true
     

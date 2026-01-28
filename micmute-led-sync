@@ -24,6 +24,127 @@ LED_MODE="hybrid"  # ucm, hybrid, userspace
 UCM_PROFILE=""
 INTERNAL_CARDS=""
 
+# Background process PIDs for cleanup
+PACTL_PID=""
+LIBINPUT_PID=""
+
+# Cleanup function for trap
+cleanup() {
+    # Kill pactl subscribe background job if running
+    if [[ -n "$PACTL_PID" ]] && kill -0 "$PACTL_PID" 2>/dev/null; then
+        kill "$PACTL_PID" 2>/dev/null || true
+    fi
+    # Kill libinput process if running
+    if [[ -n "$LIBINPUT_PID" ]] && kill -0 "$LIBINPUT_PID" 2>/dev/null; then
+        kill "$LIBINPUT_PID" 2>/dev/null || true
+    fi
+    # Kill any remaining background jobs
+    local job
+    for job in $(jobs -p 2>/dev/null); do
+        kill "$job" 2>/dev/null || true
+    done
+}
+
+# Set up cleanup trap
+trap cleanup EXIT INT TERM
+
+# Validate LED_PATH is within /sys/class/leds/ and ends with /brightness
+validate_led_path() {
+    local path="$1"
+    
+    # Must start with /sys/class/leds/
+    if [[ ! "$path" =~ ^/sys/class/leds/ ]]; then
+        echo "Error: LED_PATH must be within /sys/class/leds/" >&2
+        return 1
+    fi
+    
+    # Must end with /brightness
+    if [[ ! "$path" =~ /brightness$ ]]; then
+        echo "Error: LED_PATH must end with /brightness" >&2
+        return 1
+    fi
+    
+    return 0
+}
+
+# Write to LED with canonical path resolution and validation
+write_led() {
+    local value="$1"
+    local resolved_path
+    
+    # Resolve canonical path
+    resolved_path=$(readlink -f "$LED_PATH" 2>/dev/null) || {
+        echo "Error: Cannot resolve LED_PATH: $LED_PATH" >&2
+        return 1
+    }
+    
+    # Validate resolved path is still within /sys/class/leds/
+    if [[ ! "$resolved_path" =~ ^/sys/class/leds/ ]]; then
+        echo "Error: Resolved LED path is outside /sys/class/leds/: $resolved_path" >&2
+        return 1
+    fi
+    
+    # Ensure it ends with /brightness (even after resolution)
+    if [[ ! "$resolved_path" =~ /brightness$ ]]; then
+        echo "Error: Resolved LED path does not end with /brightness: $resolved_path" >&2
+        return 1
+    fi
+    
+    # Write the value
+    echo "$value" > "$resolved_path" 2>/dev/null || true
+}
+
+# Validate LED_MODE configuration value
+validate_led_mode() {
+    case "$LED_MODE" in
+        ucm|hybrid|userspace)
+            return 0
+            ;;
+        *)
+            echo "Error: Invalid LED_MODE '$LED_MODE'. Must be one of: ucm, hybrid, userspace" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Validate LED_PATH configuration value
+validate_config_led_path() {
+    # Must match pattern /sys/class/leds/*/brightness
+    if [[ ! "$LED_PATH" =~ ^/sys/class/leds/[^/]+/brightness$ ]]; then
+        echo "Error: Invalid LED_PATH '$LED_PATH'. Must match pattern /sys/class/leds/*/brightness" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Validate INPUT_DEVICE configuration value
+validate_input_device() {
+    # Must be within /dev/input/ directory
+    if [[ ! "$INPUT_DEVICE" =~ ^/dev/input/ ]]; then
+        echo "Error: Invalid INPUT_DEVICE '$INPUT_DEVICE'. Must be within /dev/input/ directory" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Validate INTERNAL_CARDS configuration value
+validate_internal_cards() {
+    # Must contain only alphanumeric and space characters
+    if [[ -n "$INTERNAL_CARDS" ]] && [[ ! "$INTERNAL_CARDS" =~ ^[[:alnum:][:space:]]+$ ]]; then
+        echo "Error: Invalid INTERNAL_CARDS '$INTERNAL_CARDS'. Must contain only alphanumeric and space characters" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Validate all configuration values
+validate_config() {
+    validate_led_mode || return 1
+    validate_config_led_path || return 1
+    validate_input_device || return 1
+    validate_internal_cards || return 1
+}
+
 # Load configuration
 load_config() {
     local config_file=""
@@ -34,6 +155,19 @@ load_config() {
     fi
     
     if [[ -n "$config_file" ]]; then
+        # Check config file permissions - must not be world-writable
+        local perms
+        perms=$(stat -c "%a" "$config_file" 2>/dev/null) || perms=$(stat -f "%Lp" "$config_file" 2>/dev/null)
+        if [[ -n "$perms" ]]; then
+            # Check if world-writable (last digit >= 2)
+            local world_perm
+            world_perm=${perms: -1}
+            if [[ "$world_perm" =~ [2367] ]]; then
+                echo "Error: Config file $config_file is world-writable (permissions: $perms). Refusing to load." >&2
+                exit 1
+            fi
+        fi
+        
         # Source the config file safely
         while IFS='=' read -r key value; do
             # Skip comments and empty lines
@@ -51,6 +185,9 @@ load_config() {
             esac
         done < "$config_file"
     fi
+    
+    # Validate all configuration values after loading
+    validate_config || exit 1
 }
 
 # Get the default audio source
@@ -110,7 +247,7 @@ is_ucm_managed() {
                     # Auto-detect: assume first few PCI cards are internal
                     # Common internal card patterns
                     if [[ "$device_id" == *"pci"* ]] || \
-                       [[ "$device_id" == *"usb" == "" ]]; then
+                       [[ -z "$device_id" ]]; then
                         return 0  # Likely internal, let UCM handle
                     fi
                 fi
@@ -175,10 +312,15 @@ sync_led() {
     # Userspace handling for external sources
     muted="$(get_mute_state "$source")"
     
+    # Validate LED_PATH before writing
+    if ! validate_led_path "$LED_PATH"; then
+        return 1
+    fi
+    
     if [[ "$muted" == "yes" ]]; then
-        echo 1 > "$LED_PATH" 2>/dev/null || true
+        write_led 1
     else
-        echo 0 > "$LED_PATH" 2>/dev/null || true
+        write_led 0
     fi
 }
 
@@ -193,7 +335,7 @@ wait_for_audio() {
 main() {
     load_config
     
-    # Validate LED path
+    # Validate LED path is writable
     if [[ ! -w "$LED_PATH" ]]; then
         echo "Error: Cannot write to LED path: $LED_PATH" >&2
         exit 1
@@ -215,6 +357,7 @@ main() {
             sleep 1
         done
     ) &
+    PACTL_PID=$!
     
     # Key event listener
     while true; do
@@ -225,7 +368,10 @@ main() {
                     sync_led
                     ;;
             esac
-        done
+        done &
+        LIBINPUT_PID=$!
+        wait "$LIBINPUT_PID" 2>/dev/null || true
+        LIBINPUT_PID=""
         sleep 1
     done
 }
